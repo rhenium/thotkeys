@@ -1,0 +1,22 @@
+# autoreconf -i
+/configure
+/autom4te.cache
+/aclocal.m4
+/compile
+/config.h.in
+/depcomp
+/install-sh
+/missing
+Makefile.in
+
+# ./configure
+Makefile
+/.deps
+/config.h
+/config.log
+/config.status
+/stamp-h1
+
+# make
+*.o
+thotkeys
