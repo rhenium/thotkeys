@@ -60,11 +60,11 @@ static XDeviceInfo *get_device_info(Display *display, const char *name)
 	for (int i = 0; i < num_devices; i++) {
 		XDeviceInfo *device = &devices[i];
 
-		if (device->use < IsXExtensionDevice)
+		if (device->use != IsXExtensionKeyboard)
 			continue;
 		if (!strcmp(device->name, name) || use_id && (long)device->id == id) {
 			if (found)
-				fatal("more than one device found with the " \
+				fatal("more than one keyboard found with the " \
 				      "name '%s'\n", name);
 			found = device;
 		}
