@@ -84,12 +84,15 @@ static XIDeviceInfo *get_device_info(Display *display, const char *name)
 
 static void prepare_monitor(Display *display, const char *device_name)
 {
-	XIDeviceInfo *info = get_device_info(display, device_name);
-	if (!info)
-		fatal("unable to find device '%s'\n", device_name);
+	XIDeviceInfo *info = NULL;
+	if (device_name) {
+		info = get_device_info(display, device_name);
+		if (!info)
+			fatal("unable to find device '%s'\n", device_name);
+	}
 
 	XIEventMask mask;
-	mask.deviceid = info->deviceid;
+	mask.deviceid = info ? info->deviceid : XIAllMasterDevices;
 	mask.mask_len = XIMaskLen(XI_LASTEVENT);
 	mask.mask = xcalloc((size_t)mask.mask_len, 1);
 	XISetMask(mask.mask, XI_RawKeyPress);
@@ -132,9 +135,9 @@ static void command_help(void)
 	fprintf(stderr, "Commands:\n");
 	fprintf(stderr, "  thotkeys --help\n");
 	fprintf(stderr, "    Show this message\n");
-	fprintf(stderr, "  thotkeys --device <device> --monitor\n");
+	fprintf(stderr, "  thotkeys [--device <device>] --monitor\n");
 	fprintf(stderr, "    Print key press and release events to stdout\n");
-	fprintf(stderr, "  thotkeys --device <device> --hotkey --key <key> " \
+	fprintf(stderr, "  thotkeys [--device <device>] --hotkey --key <key> " \
 		"[--key <key>...] --on-press <on-press> [--hotkey ...]\n");
 	fprintf(stderr, "    Run <on-press> when <key> is pressed down. " \
 		"SIGTERM will be sent to the process when the hotkey is\n" \
@@ -337,10 +340,6 @@ int main(int argc, char **argv)
 				.numkeystrs = numkeys,
 				.on_press = on_press,
 		};
-	}
-	if (do_monitor || do_hotkeys) {
-		if (!device_name)
-			fatal("--device option is required\n");
 	}
 	if (optind != argc)
 		fatal("unknown argument %s\n", argv[optind]);
