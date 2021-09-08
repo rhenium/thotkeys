@@ -7,8 +7,10 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <sys/wait.h>
+#include <X11/X.h>
+#include <X11/Xlib.h>
 #include <X11/XKBlib.h>
-#include <X11/extensions/XInput.h>
+#include <X11/extensions/XInput2.h>
 
 static int VERBOSE = 0;
 
@@ -34,6 +36,14 @@ static inline void *xrealloc(void *o, size_t size)
 	return p;
 }
 
+static inline void *xcalloc(size_t nmemb, size_t size)
+{
+	void *p = calloc(nmemb, size);
+	if (!p)
+		fatal("calloc failed\n");
+	return p;
+}
+
 static Display *get_display(void)
 {
 	Display *display = XOpenDisplay(NULL);
@@ -42,7 +52,7 @@ static Display *get_display(void)
 	return display;
 }
 
-static XDeviceInfo *get_device_info(Display *display, const char *name)
+static XIDeviceInfo *get_device_info(Display *display, const char *name)
 {
 	bool use_id = true;
 	long id;
@@ -54,15 +64,15 @@ static XDeviceInfo *get_device_info(Display *display, const char *name)
 		use_id = false;
 
 	int num_devices;
-	XDeviceInfo *devices = XListInputDevices(display, &num_devices);
+	XIDeviceInfo *devices = XIQueryDevice(display, XIAllDevices, &num_devices);
 
-	XDeviceInfo *found = NULL;
+	XIDeviceInfo *found = NULL;
 	for (int i = 0; i < num_devices; i++) {
-		XDeviceInfo *device = &devices[i];
+		XIDeviceInfo *device = &devices[i];
 
-		if (device->use != IsXExtensionKeyboard)
+		if (device->use != XISlaveKeyboard)
 			continue;
-		if (!strcmp(device->name, name) || use_id && (long)device->id == id) {
+		if (!strcmp(device->name, name) || use_id && (long)device->deviceid == id) {
 			if (found)
 				fatal("more than one keyboard found with the " \
 				      "name '%s'\n", name);
@@ -72,65 +82,47 @@ static XDeviceInfo *get_device_info(Display *display, const char *name)
 	return found;
 }
 
-static XID key_press_type, key_release_type;
-static bool is_key_press_event(const XDeviceKeyEvent *ev)
-{
-	return ev->type == (int)key_press_type;
-}
-
-static void register_events(Display *display, XDevice *device)
-{
-	int screen = DefaultScreen(display);
-	Window root_win = RootWindow(display, screen);
-
-	XEventClass event_list[2];
-	DeviceKeyPress(device, key_press_type, event_list[0]);
-	DeviceKeyRelease(device, key_release_type, event_list[1]);
-	if (XSelectExtensionEvent(display, root_win, event_list, 2))
-		fatal("XSelectExtensionEvent() failed\n");
-}
-
 static void prepare_monitor(Display *display, const char *device_name)
 {
-	XDeviceInfo *info = get_device_info(display, device_name);
+	XIDeviceInfo *info = get_device_info(display, device_name);
 	if (!info)
 		fatal("unable to find device '%s'\n", device_name);
 
-	XDevice *device = XOpenDevice(display, info->id);
-	if (!device)
-		fatal("unable to open device '%s'\n", device_name);
+	XIEventMask mask;
+	mask.deviceid = info->deviceid;
+	mask.mask_len = XIMaskLen(XI_LASTEVENT);
+	mask.mask = xcalloc((size_t)mask.mask_len, 1);
+	XISetMask(mask.mask, XI_RawKeyPress);
+	XISetMask(mask.mask, XI_RawKeyRelease);
 
-	register_events(display, device);
+	if (XISelectEvents(display,  DefaultRootWindow(display), &mask, 1))
+		fatal("XISelectEvents() failed\n");
+	XSync(display, False);
+	free(mask.mask);
 }
 
-
-static XEvent process_event_ev;
-static const XDeviceKeyEvent *process_event(Display *display)
+static const XIRawEvent *process_event(Display *display, int *evtype)
 {
-redo:
-	XNextEvent(display, &process_event_ev);
+	static XEvent ev;
+	XGenericEventCookie *cookie = &ev.xcookie;
 
-	if (process_event_ev.type == (int)key_press_type)
-		return (XDeviceKeyEvent *)&process_event_ev;
-	if (process_event_ev.type == (int)key_release_type) {
-		// Retriggered events
-		if (XEventsQueued(display, QueuedAfterReading)) {
-			XEvent nev;
-			XPeekEvent(display, &nev);
-
-			if (nev.type == (int)key_press_type &&
-			    nev.xkey.time == process_event_ev.xkey.time &&
-			    nev.xkey.keycode == process_event_ev.xkey.keycode) {
-				// Consume the following KeyPress
-				XNextEvent(display, &nev);
-				goto redo;
-			}
-		}
-		return (XDeviceKeyEvent *)&process_event_ev;
+	static int xi_opcode;
+	if (!xi_opcode) {
+		int event, error;
+		if (!XQueryExtension(display, "XInputExtension", &xi_opcode, &event, &error))
+			fatal("X Input extension not available\n");
 	}
 
-	debug("ignoring event %d\n", process_event_ev.type);
-	goto redo;
+redo:
+	XNextEvent(display, &ev);
+	if (!XGetEventData(display, cookie) ||
+	    cookie->type != GenericEvent ||
+	    cookie->extension != xi_opcode ||
+	    (cookie->evtype != XI_RawKeyPress && cookie->evtype != XI_RawKeyRelease))
+		goto redo;
+
+	*evtype = cookie->evtype;
+	return cookie->data;
 }
 
 static void command_help(void)
@@ -161,12 +153,14 @@ static void command_monitor(const char *device_name)
 
 	char keymap[256] = { 0 };
 	while (1) {
-		const XDeviceKeyEvent *ev = process_event(display);
-		bool pressed = is_key_press_event(ev);
+		int evtype;
+		const XIRawEvent *data = process_event(display, &evtype);
+		int keycode = data->detail;
+		bool pressed = evtype == XI_RawKeyPress;
 
-		if (ev->keycode > 255)
-			fatal("unexpected keycode %d\n", (int)ev->keycode);
-		keymap[ev->keycode] = pressed;
+		if (keycode > 255)
+			fatal("unexpected keycode %d\n", keycode);
+		keymap[keycode] = pressed;
 
 		for (int i = 0; i < 256; i++) {
 			if (keymap[i]) {
@@ -174,7 +168,7 @@ static void command_monitor(const char *device_name)
 				printf("--key %s ", XKeysymToString(keysym));
 			}
 		}
-		KeySym basekeysym = XkbKeycodeToKeysym(display, (KeyCode)ev->keycode, 0, 0);
+		KeySym basekeysym = XkbKeycodeToKeysym(display, (KeyCode)keycode, 0, 0);
 		printf("# %s %s\n",
 		       pressed ? "pressed" : "released",
 		       XKeysymToString(basekeysym));
@@ -232,18 +226,20 @@ static void command_hotkeys(const char *device_name, struct hotkey_config *hotke
 			}
 		}
 
-		const XDeviceKeyEvent *ev = process_event(display);
-		bool pressed = is_key_press_event(ev);
+		int evtype;
+		const XIRawEvent *data = process_event(display, &evtype);
+		int keycode = data->detail;
+		bool pressed = evtype == XI_RawKeyPress;
 
-		if (ev->keycode > 255)
-			fatal("unexpected keycode %d\n", (int)ev->keycode);
+		if (keycode > 255)
+			fatal("unexpected keycode %d\n", keycode);
 
 		for (size_t i = 0; i < numhotkeys; i++) {
 			struct hotkey_config *c = hotkeys + i;
-			if (!c->checkmap[ev->keycode])
+			if (!c->checkmap[keycode])
 				continue;
 
-			c->keymap[ev->keycode] = pressed;
+			c->keymap[keycode] = pressed;
 			bool matched = !memcmp(c->checkmap, c->keymap, sizeof(c->checkmap));
 
 			if (!c->activated && matched) {

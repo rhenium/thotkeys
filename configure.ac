@@ -13,7 +13,7 @@ CFLAGS="$CFLAGS -Wall -Wextra -Wconversion -Wno-parentheses"
 
 # Checks for libraries.
 PKG_CHECK_MODULES(X11, [x11])
-PKG_CHECK_MODULES(XINPUT, [xi])
+PKG_CHECK_MODULES(XI21, [xi >= 1.4.99.1] [inputproto >= 2.0.99.1])
 
 AC_CONFIG_FILES([Makefile])
 AC_OUTPUT
