@@ -1,4 +1,5 @@
 #include "config.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,24 @@ static inline void *xcalloc(size_t nmemb, size_t size)
 		fatal("calloc failed\n");
 	return p;
 }
+
+struct hotkey_map {
+	char keys[256];
+	char buttons[256];
+};
+
+struct hotkey_config {
+	const char **keystrs;
+	size_t numkeystrs;
+	const char **buttonstrs;
+	size_t numbuttonstrs;
+	const char *on_press;
+
+	struct hotkey_map keymap;
+	struct hotkey_map checkmap;
+	bool activated;
+	pid_t pid;
+};
 
 static Display *get_display(void)
 {
@@ -97,6 +116,8 @@ static void prepare_monitor(Display *display, const char *device_name)
 	mask.mask = xcalloc((size_t)mask.mask_len, 1);
 	XISetMask(mask.mask, XI_RawKeyPress);
 	XISetMask(mask.mask, XI_RawKeyRelease);
+	XISetMask(mask.mask, XI_RawButtonPress);
+	XISetMask(mask.mask, XI_RawButtonRelease);
 
 	if (XISelectEvents(display,  DefaultRootWindow(display), &mask, 1))
 		fatal("XISelectEvents() failed\n");
@@ -116,16 +137,22 @@ static const XIRawEvent *process_event(Display *display, int *evtype)
 			fatal("X Input extension not available\n");
 	}
 
-redo:
-	XNextEvent(display, &ev);
-	if (!XGetEventData(display, cookie) ||
-	    cookie->type != GenericEvent ||
-	    cookie->extension != xi_opcode ||
-	    (cookie->evtype != XI_RawKeyPress && cookie->evtype != XI_RawKeyRelease))
-		goto redo;
+	while (1) {
+		XNextEvent(display, &ev);
+		if (!XGetEventData(display, cookie) ||
+		    cookie->type != GenericEvent ||
+		    cookie->extension != xi_opcode)
+			continue;
 
-	*evtype = cookie->evtype;
-	return cookie->data;
+		switch (cookie->evtype) {
+		case XI_RawKeyPress:
+		case XI_RawKeyRelease:
+		case XI_RawButtonPress:
+		case XI_RawButtonRelease:
+			*evtype = cookie->evtype;
+			return cookie->data;
+		}
+	}
 }
 
 static void command_help(void)
@@ -134,18 +161,29 @@ static void command_help(void)
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Commands:\n");
 	fprintf(stderr, "  thotkeys --help\n");
-	fprintf(stderr, "    Show this message\n");
-	fprintf(stderr, "  thotkeys [--device <device>] --monitor\n");
-	fprintf(stderr, "    Print key press and release events to stdout\n");
-	fprintf(stderr, "  thotkeys [--device <device>] --hotkey --key <key> " \
-		"[--key <key>...] --on-press <on-press> [--hotkey ...]\n");
-	fprintf(stderr, "    Run <on-press> when <key> is pressed down. " \
-		"SIGTERM will be sent to the process when the hotkey is\n" \
-		"    released. --hotkey and the following options may be repeated.\n");
+	fprintf(stderr, "    Show this message.\n");
+	fprintf(stderr, "  thotkeys --monitor\n");
+	fprintf(stderr, "    Print key and button events to stdout.\n");
+	fprintf(stderr, "  thotkeys --hotkey [--key <keysym>] [--button <num>] --on-press <on-press>\n");
+	fprintf(stderr, "    Register a hotkey. See also 'Hotkey options' section.\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Options:\n");
+	fprintf(stderr, "  --device <device>\n");
+	fprintf(stderr, "    Monitor events from the specified device only.\n");
+	fprintf(stderr, "    <device> may be either the device name or the number. Check 'xinput list'.\n");
+	fprintf(stderr, "    [TODO: Support for mouse and multiple keyboard devices]\n");
 	fprintf(stderr, "  --verbose\n");
-	fprintf(stderr, "    Enable debugging output\n");
+	fprintf(stderr, "    Enable debugging output.\n");
+	fprintf(stderr, "\n");
+	fprintf(stderr, "Hotkey options:\n");
+	fprintf(stderr, "  --key <keysym>\n");
+	fprintf(stderr, "    Specify a key. Use --monitor to see the appropriate keysym string.\n");
+	fprintf(stderr, "  --button <num>\n");
+	fprintf(stderr, "    Specify a button by the button number.\n");
+	fprintf(stderr, "  --on-press <on-press>\n");
+	fprintf(stderr, "    Execute <on-press> on '/bin/sh -c' when all specified keys and buttons\n");
+	fprintf(stderr, "    are pressed at the same time.\n");
+	fprintf(stderr, "    SIGTERM will be sent to the process when the condition is no longer met.\n");
 	exit(0);
 }
 
@@ -154,40 +192,54 @@ static void command_monitor(const char *device_name)
 	Display *display = get_display();
 	prepare_monitor(display, device_name);
 
-	char keymap[256] = { 0 };
+	struct hotkey_map keymap = { 0 };
 	while (1) {
 		int evtype;
 		const XIRawEvent *data = process_event(display, &evtype);
-		int keycode = data->detail;
-		bool pressed = evtype == XI_RawKeyPress;
+		bool pressed;
+		char comment[256];
 
-		if (keycode > 255)
-			fatal("unexpected keycode %d\n", keycode);
-		keymap[keycode] = pressed;
+		switch (evtype) {
+		case XI_RawKeyPress:
+		case XI_RawKeyRelease:
+			if (data->detail > 255)
+				fatal("unexpected keycode %d\n", data->detail);
+			pressed = evtype == XI_RawKeyPress;
+			keymap.keys[data->detail] = pressed;
+
+			KeySym basekeysym = XkbKeycodeToKeysym(display, (KeyCode)data->detail, 0, 0);
+			snprintf(comment, sizeof(comment), "# %s key %s",
+				 pressed ? "pressed" : "released",
+				 XKeysymToString(basekeysym));
+			break;
+		case XI_RawButtonPress:
+		case XI_RawButtonRelease:
+			if (data->detail > 255)
+				fatal("unexpected button number %d\n", data->detail);
+			pressed = evtype == XI_RawButtonPress;
+			keymap.buttons[data->detail] = pressed;
+
+			snprintf(comment, sizeof(comment), "# %s button %d",
+				 pressed ? "pressed" : "released",
+				 data->detail);
+			break;
+		default:
+			fatal("unreachable\n");
+		}
 
 		for (int i = 0; i < 256; i++) {
-			if (keymap[i]) {
+			if (keymap.keys[i]) {
 				KeySym keysym = XkbKeycodeToKeysym(display, (KeyCode)i, 0, 0);
 				printf("--key %s ", XKeysymToString(keysym));
 			}
 		}
-		KeySym basekeysym = XkbKeycodeToKeysym(display, (KeyCode)keycode, 0, 0);
-		printf("# %s %s\n",
-		       pressed ? "pressed" : "released",
-		       XKeysymToString(basekeysym));
+		for (int i = 0; i < 256; i++) {
+			if (keymap.buttons[i])
+				printf("--button %d ", i);
+		}
+		printf("%s\n", comment);
 	}
 }
-
-struct hotkey_config {
-	const char **keystrs;
-	size_t numkeystrs;
-	const char *on_press;
-
-	char keymap[256];
-	char checkmap[256];
-	bool activated;
-	pid_t pid;
-};
 
 static void command_hotkeys(const char *device_name, struct hotkey_config *hotkeys,
 			    size_t numhotkeys)
@@ -197,8 +249,8 @@ static void command_hotkeys(const char *device_name, struct hotkey_config *hotke
 
 	for (size_t i = 0; i < numhotkeys; i++) {
 		struct hotkey_config *c = hotkeys + i;
-		memset(c->keymap, 0, sizeof(c->keymap));
-		memset(c->checkmap, 0, sizeof(c->checkmap));
+		memset(&c->keymap, 0, sizeof(c->keymap));
+		memset(&c->checkmap, 0, sizeof(c->checkmap));
 		c->activated = false;
 		c->pid = -1;
 
@@ -210,7 +262,14 @@ static void command_hotkeys(const char *device_name, struct hotkey_config *hotke
 			KeyCode keycode = XKeysymToKeycode(display, keysym);
 			if (keycode == 0)
 				fatal("--key %s could not be converted into keycode\n", str);
-			c->checkmap[keycode] = 1;
+			c->checkmap.keys[keycode] = 1;
+		}
+		for (size_t j = 0; j < c->numbuttonstrs; j++) {
+			const char *str = c->buttonstrs[j];
+			long num = strtol(str, NULL, 10);
+			if (num < 1 || num > 255)
+				fatal("--button %s could not be recognized\n", str);
+			c->checkmap.buttons[num] = 1;
 		}
 	}
 
@@ -231,19 +290,35 @@ static void command_hotkeys(const char *device_name, struct hotkey_config *hotke
 
 		int evtype;
 		const XIRawEvent *data = process_event(display, &evtype);
-		int keycode = data->detail;
-		bool pressed = evtype == XI_RawKeyPress;
+		bool pressed;
+		ptrdiff_t offset;
 
-		if (keycode > 255)
-			fatal("unexpected keycode %d\n", keycode);
+		switch (evtype) {
+		case XI_RawKeyPress:
+		case XI_RawKeyRelease:
+			if (data->detail > 255)
+				fatal("unexpected keycode %d\n", data->detail);
+			pressed = evtype == XI_RawKeyPress;
+			offset = offsetof(struct hotkey_map, keys) + (size_t)data->detail;
+			break;
+		case XI_RawButtonPress:
+		case XI_RawButtonRelease:
+			if (data->detail > 255)
+				fatal("unexpected button number %d\n", data->detail);
+			pressed = evtype == XI_RawButtonPress;
+			offset = offsetof(struct hotkey_map, buttons) + (size_t)data->detail;
+			break;
+		default:
+			fatal("unreachable\n");
+		}
 
 		for (size_t i = 0; i < numhotkeys; i++) {
 			struct hotkey_config *c = hotkeys + i;
-			if (!c->checkmap[keycode])
+			if (!*((char *)&c->checkmap + offset))
 				continue;
 
-			c->keymap[keycode] = pressed;
-			bool matched = !memcmp(c->checkmap, c->keymap, sizeof(c->checkmap));
+			*((char *)&c->keymap + offset) = pressed;
+			bool matched = !memcmp(&c->checkmap, &c->keymap, sizeof(c->checkmap));
 
 			if (!c->activated && matched) {
 				if (c->pid != -1)
@@ -270,9 +345,9 @@ int main(int argc, char **argv)
 {
 	const char *device_name = NULL;
 	bool do_help = false, do_monitor = false, do_hotkeys = false;
-	size_t numhotkeys = 0, numkeys = 0;
+	size_t numhotkeys = 0, numkeys = 0, numbuttons = 0;
 	struct hotkey_config *hotkeys = NULL;
-	const char **keys = NULL, *on_press = NULL;
+	const char **keys = NULL, **buttons = NULL, *on_press = NULL;
 
 	while (1) {
 		static struct option long_options[] = {
@@ -284,6 +359,7 @@ int main(int argc, char **argv)
 
 			{ "device",   required_argument, 0, 'd' },
 			{ "key",      required_argument, 0, 'k' },
+			{ "button",   required_argument, 0, 'b' },
 			{ "on-press", required_argument, 0, 'p' },
 			{ 0 }
 		};
@@ -303,16 +379,19 @@ int main(int argc, char **argv)
 			break;
 		case 'K':
 			if (do_hotkeys) {
-				if (!keys || !on_press)
+				if ((!keys && !buttons) || !on_press)
 					fatal("--key and --on-press options are required\n");
 				hotkeys = xrealloc(hotkeys, sizeof(*hotkeys) * (numhotkeys + 1));
 				hotkeys[numhotkeys++] = (struct hotkey_config) {
 					.keystrs = keys,
-						.numkeystrs = numkeys,
-						.on_press = on_press,
+					.numkeystrs = numkeys,
+					.buttonstrs = buttons,
+					.numbuttonstrs = numbuttons,
+					.on_press = on_press,
 				};
 				keys = NULL;
 				numkeys = 0;
+				numbuttons = 0;
 				on_press = NULL;
 			}
 			do_hotkeys = true;
@@ -323,6 +402,10 @@ int main(int argc, char **argv)
 			keys = xrealloc(keys, sizeof(*keys) * (numkeys + 1));
 			keys[numkeys++] = optarg;
 			break;
+		case 'b':
+			buttons = xrealloc(buttons, sizeof(*buttons) * (numbuttons + 1));
+			buttons[numbuttons++] = optarg;
+			break;
 		case 'p':
 			on_press = optarg; break;
 		case '?':
@@ -332,13 +415,15 @@ int main(int argc, char **argv)
 		}
 	}
 	if (do_hotkeys) {
-		if (!keys || !on_press)
+		if ((!keys && !buttons) || !on_press)
 			fatal("--key and --on-press options are required\n");
 		hotkeys = xrealloc(hotkeys, sizeof(*hotkeys) * (numhotkeys + 1));
 		hotkeys[numhotkeys++] = (struct hotkey_config) {
 			.keystrs = keys,
-				.numkeystrs = numkeys,
-				.on_press = on_press,
+			.numkeystrs = numkeys,
+			.buttonstrs = buttons,
+			.numbuttonstrs = numbuttons,
+			.on_press = on_press,
 		};
 	}
 	if (optind != argc)

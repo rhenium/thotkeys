@@ -28,26 +28,23 @@ Usage
 
 Monitor events:
 
-	# Use xorg-xinput to find out the device name/id
-	$ xinput list
-	[...]
-	    ↳ Topre REALFORCE 87 US                   	id=11	[slave  keyboard (3)]
-	[...]
-
-	$ ./thotkeys --device 'Topre REALFORCE 87 US' --monitor
-	# released Return
-	--key Control_L # pressed Control_L
-	--key Control_L --key c # pressed c
-	^C
+	$ ./thotkeys --monitor
+	# released key Return
+	--key Control_L # pressed key Control_L
+	--key Control_L --key Super_L # pressed key Super_L
+	--key Control_L --key Super_L --button 1 # pressed button 1
+	--key Control_L --key Super_L # released button 1
+	--key Control_L # released key Super_L
+	# released key Control_L
 
 Register hotkeys:
 
-	$ ./thotkeys --device 'Topre REALFORCE 87 US' \
-		--hotkey --key Control_L --key m \
-		--on-press 'while :; do echo Ctrl+M is pressed; sleep 0.1; done'
+	$ ./thotkeys \
+		--hotkey --key Control_L --key Super_L --button 1 \
+		--on-press 'while :; do echo LCtrl+LWin+LClick is pressed; sleep 0.1; done'
 
 	$ # Registering multiple hotkeys
-	$ ./thotkeys --device 'Topre REALFORCE 87 US' \
+	$ ./thotkeys \
 		--hotkey --key Control_L --key m --on-press \
 			'while :; do echo Ctrl+M is pressed; sleep 0.1; done' \
 		--hotkey --key F11 --on-press \
